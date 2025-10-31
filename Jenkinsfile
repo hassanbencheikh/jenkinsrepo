@@ -1,88 +1,102 @@
 pipeline {
+    // We still need a top-level agent, but it will just coordinate.
     agent any
+
     environment {
-        // Set up Python and Docker
         PYTHON_IMAGE = 'python:3.9-slim'
         IMAGE_NAME = 'python-devsecops-jenkins_app'
+        // This image has Docker-Compose and Trivy pre-installed
+        // This is much cleaner than installing it yourself.
+        BUILD_TOOLS_IMAGE = 'docker/compose:latest' 
+        TRIVY_IMAGE = 'aquasec/trivy:latest'
     }
+
     stages {
         stage('Checkout') {
             steps {
-                // Pull the code from GitHub
-                checkout scm
+                checkout scm [cite: 2]
             }
         }
 
-        stage('Install Dependencies') {
-            steps {
-                script {
-                    // Install Python dependencies
-                    sh 'python3 -m venv venv'
-                    sh './venv/bin/pip install -r requirements.txt'
+        // --- Run all Python steps inside a Python container ---
+        stage('Run Python Analysis & Tests') {
+            // This agent block applies to all stages nested inside
+            agent {
+                docker { image env.PYTHON_IMAGE }
+            }
+            stages {
+                stage('Install Dependencies') {
+                    steps {
+                        sh 'python3 -m venv venv' [cite: 3]
+                        sh './venv/bin/pip install -r requirements.txt'
+                    }
+                }
+                stage('Run Tests') {
+                    steps {
+                        sh './venv/bin/pytest' [cite: 4]
+                    }
+                }
+                stage('Static Code Analysis (Bandit)') {
+                    steps {
+                        sh './venv/bin/bandit -r .' [cite: 6]
+                    }
+                }
+                stage('Check Dependency Vulnerabilities (Safety)') {
+                    steps {
+                        sh './venv/bin/safety check' [cite: 9]
+                    }
                 }
             }
         }
 
-        stage('Run Tests') {
-            steps {
-                script {
-                    // Run the tests with pytest
-                    sh './venv/bin/pytest'
-                }
-            }
-        }
-
-        stage('Static Code Analysis (Bandit)') {
-            steps {
-                script {
-                    // Run Bandit for static code analysis
-                    sh './venv/bin/bandit -r .'
-                }
-            }
-        }
-
-        stage('Container Vulnerability Scan (Trivy)') {
-            steps {
-                script {
-                    // Build the Docker image
-                    sh 'docker-compose build'
-                    // Scan the image with Trivy
-                    sh 'trivy image ${IMAGE_NAME}:latest'
-                }
-            }
-        }
-
-        stage('Check Dependency Vulnerabilities (Safety)') {
-            steps {
-                script {
-                    // Run Safety to check dependencies
-                    sh './venv/bin/safety check'
-                }
-            }
-        }
-
+        // --- Run Docker steps using Docker-Compose ---
         stage('Build Docker Image') {
+            agent {
+                // Use a Docker Compose image
+                docker { image env.BUILD_TOOLS_IMAGE }
+            }
             steps {
-                script {
-                    // Build Docker image
-                    sh 'docker-compose build'
-                }
+                // The 'docker/compose' image's command is 'docker-compose'
+                // We pass 'build' as an argument.
+                sh 'docker-compose build' [cite: 10]
+            }
+        }
+
+        // --- Scan the image using a Trivy container ---
+        stage('Container Vulnerability Scan (Trivy)') {
+            agent {
+                docker { image env.TRIVY_IMAGE }
+            }
+            steps {
+                // The 'aquasec/trivy' image's command is 'trivy'
+                // We pass 'image ...' as arguments
+                sh 'trivy image ${IMAGE_NAME}:latest' [cite: 7]
             }
         }
 
         stage('Deploy Application') {
+            agent {
+                docker { image env.BUILD_TOOLS_IMAGE }
+            }
             steps {
-                script {
-                    // Deploy the application using Docker Compose
-                    sh 'docker-compose up -d'
-                }
+                sh 'docker-compose up -d' [cite: 11]
             }
         }
     }
+
+    // --- Post-build actions ---
     post {
         always {
-            // Clean up after build
-            cleanWs()
+            // We use a docker-compose agent to ensure we can
+            // always run 'docker-compose down'
+            agent {
+                docker { image env.BUILD_TOOLS_IMAGE }
+            }
+            steps {
+                echo "Cleaning up containers..."
+                sh 'docker-compose down' // Bring down the deployed app
+                cleanWs() [cite: 12] // Cleans the Jenkins workspace
+            }
         }
     }
 }
